@@ -1,7 +1,7 @@
 # Projet d'Infrastructure — Portail d'Accès Sécurisé (SecureNet)
 
 > **Entreprise fictive :** SecureNet SAS  
-> **Contexte :** Infrastructure de passerelle de services sécurisée déployée sur cloud (Hetzner) via IaC (Terraform + Ansible)
+> **Contexte :** Infrastructure de passerelle de services sécurisée déployée sur cloud  via IaC (Terraform + Ansible)
 
 ---
 
