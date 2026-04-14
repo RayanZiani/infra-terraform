@@ -1,20 +1,20 @@
-# Projet d'Infrastructure — Déploiement d'une Plateforme VPN
+# Projet d'Infrastructure — Portail d'Accès Sécurisé (SecureNet)
 
 > **Entreprise fictive :** SecureNet SAS  
-> **Contexte :** Infrastructure de VPN commerciale déployée sur cloud (Hetzner) via IaC (Terraform + Ansible)
+> **Contexte :** Infrastructure de passerelle de services sécurisée déployée sur cloud (Hetzner) via IaC (Terraform + Ansible)
 
 ---
 
 ## 1. Scénario & Service Rendu
 
-SecureNet SAS est une start-up proposant un **service VPN grand public** et **proxy résidentiel** pour des entreprises. Elle a besoin d'une infrastructure :
+SecureNet SAS fournit une **plateforme d'accès sécurisé aux ressources internes** via un portail web authentifié. Elle a besoin d'une infrastructure :
 
 - **Disponible** : accessible 24/7, un seul point de panne réseau doit être évité
-- **Sécurisée** : aucune exposition directe des serveurs backend sur Internet
+- **Sécurisée** : aucune exposition directe des serveurs backend sur Internet, authentification centralisée
 - **Administrable** : déployable en quelques commandes, reproductible à l'identique
-- **Évolutive** : ajouter un nœud VPN = réexécuter un playbook Ansible
+- **Évolutive** : ajouter un serveur interne = ajouter une entrée au Dashboard
 
-**Évolutions prévues :** supervision (Prometheus + Grafana), sauvegarde chiffrée des états WireGuard, multi-région.
+**Évolutions prévues :** supervision (Prometheus + Grafana), 2FA, audit logging, multi-région.
 
 ---
 
@@ -33,7 +33,7 @@ SecureNet SAS est une start-up proposant un **service VPN grand public** et **pr
                                   │ HTTP (réseau privé 10.0.0.0/24)
                                   │ 10.0.0.10 → 10.0.0.20:8000
                     ┌─────────────▼──────────────┐
-                    │     Control Plane (API)     │
+                    │  Dashboard & Portal (API)   │
                     │   VM cp — 10.0.0.20         │
                     │   Docker : FastAPI :8000    │
                     │            PostgreSQL :5432 │
@@ -41,46 +41,52 @@ SecureNet SAS est une start-up proposant un **service VPN grand public** et **pr
                     │   Firewall : 8000 réseau    │
                     │             privé seulement │
                     │             22 admin only   │
-                    └─────────────────────────────┘
+                    │                             │
+                    │ • Dashboard : Vue des services
+                    │ • Gestion des accès         │
+                    │ • Authentification centralisée
+                    │ • API REST pour services    │
+                    └─────────────┬───────────────┘
                                   │
-                    Heartbeat HTTP (polling 30s)
+                    HTTP API (heartbeat / sync)
                     X-API-Key auth — réseau privé
                                   │
-                    ┌─────────────▼──────────────┐
-                    │        VPN Node 01          │
-                    │   VM node-01 — 10.0.0.30   │
-                    │   IP publique Y.Y.Y.Y       │
-                    │   Go Agent (vpn-agent)      │
-                    │   WireGuard wg0 UDP 51820   │
-                    │   Pool clients : 10.8.0.0/16│
-                    │   Firewall : 51820 public   │
-                    │             22 admin only   │
-                    └─────────────┬───────────────┘
-                                  │ Tunnel WireGuard chiffré
-                                  │ ChaCha20-Poly1305 + Curve25519
-                         ┌────────▼────────┐
-                         │  Clients VPN    │
-                         │  IP : 10.8.0.x  │
-                         └─────────────────┘
+         ┌────────────────────────┴────────────────────────┐
+         │                                                 │
+         ▼                                                 ▼
+┌─────────────────────┐                      ┌──────────────────┐
+│  Internal File      │                      │  Internal Tools  │
+│  Server / Storage   │                      │  Services        │
+│ VM node-01          │                      │ VM node-02       │
+│ 10.0.0.30           │                      │ 10.0.0.31        │
+│ (Réseau privé)      │                      │ (Réseau privé)   │
+│                     │                      │                  │
+│ • File Server SMB   │                      │ • Application 1  │
+│ • Backup Storage    │                      │ • Application 2  │
+│ • Archive           │                      │ • Service privé  │
+│ • Access control    │                      │ • Access control │
+│                     │                      │                  │
+└─────────────────────┘                      └──────────────────┘
 ```
 
 ### Réseaux
 
 | Réseau | Plage IP | Usage |
 |---|---|---|
-| Public (Internet) | — | Accès utilisateurs finaux, WireGuard |
+| Public (Internet) | — | Accès aux utilisateurs finaux (HTTPS) |
 | Privé Hetzner | `10.0.0.0/24` | Communication interne LB ↔ CP ↔ Nodes |
-| Tunnel VPN | `10.8.0.0/16` | IPs attribuées aux clients VPN connectés |
+| SMB / File Server | `10.0.0.0/24` | Serveurs internes (réseau privé uniquement) |
 
 ### Flux et ports
 
 | Source | Destination | Port | Protocole | Rôle |
 |---|---|---|---|---|
-| Internet | LB | 80, 443 | TCP | API HTTP/HTTPS (utilisateurs) |
+| Internet | LB | 80, 443 | TCP | Portail web (HTTPS) |
 | Admin | LB / CP / Node | 22 | TCP | SSH administrateur uniquement |
-| LB | CP | 8000 | TCP | Reverse proxy → FastAPI |
-| Node | CP | 8000 | TCP | Heartbeat, sync peers |
-| Clients VPN | Node | 51820 | UDP | Tunnel WireGuard |
+| LB | CP | 8000 | TCP | Reverse proxy → FastAPI / Dashboard |
+| Node | CP | 8000 | TCP | Heartbeat, sync état services |
+| CP / Users | Node | 445, 139 | TCP | SMB / File Server (accès contrôlé) |
+| CP / Users | Node | 3389, 22 | TCP | Outils internes (RDP, SSH) |
 
 ---
 
@@ -90,24 +96,56 @@ SecureNet SAS est une start-up proposant un **service VPN grand public** et **pr
 |---|---|---|
 | **Terraform (IaC)** | Infra reproductible en une commande. Le fichier `terraform.tfstate` est la source de vérité de l'état réel. Permet de versionner l'infra comme du code. | Ne pas committer `terraform.tfstate` ni `terraform.tfvars` (secrets). Ajouter au `.gitignore`. |
 | **Hetzner Cloud** | Coût réduit (~5€/mois par VM), datacenter européen (conformité RGPD), API simple. Provider Terraform disponible. | Moins de services managés qu'AWS. Prévoir un backup de la base manuellement si pas de snapshot auto. |
-| **3 VMs séparées** (LB + CP + Node) | Séparation des rôles : le LB est le seul point public, le CP n'est jamais exposé directement. Si le node est compromis, l'API reste protégée. | Latence réseau interne Hetzner : ~1ms → négligeable. |
-| **Nginx comme reverse proxy** | Léger, fiable, gestion native des WebSockets (proxy pool extension), facile à intégrer avec Certbot (TLS). | Configuration `proxy_set_header Upgrade` obligatoire pour le WebSocket. |
-| **Ansible pour le provisioning** | Idempotent : réexécuter les playbooks ne casse rien. Chaque rôle est indépendant et testable. Pas d'agent à installer sur les VMs cibles. | Ordre d'exécution important : CP avant Node (l'agent Go a besoin de l'API disponible). |
-| **Docker Compose en production** | Le Control Plane tourne dans 3 conteneurs (API + PostgreSQL + Redis). Isolation, rolling update simple, pas de Kubernetes pour un projet de taille raisonnable. | L'API est bindée sur `10.0.0.20:8000` uniquement, jamais sur `0.0.0.0`. |
-| **WireGuard (protocole VPN)** | Cryptographie moderne (ChaCha20-Poly1305, Curve25519). Code minimaliste (~4000 lignes vs ~70 000 pour OpenVPN). Intégré au kernel Linux depuis 5.6. | Nécessite `CAP_NET_ADMIN` pour l'agent. Géré via systemd capabilities (pas `--privileged`). |
-| **Go pour le node agent** | Compile en binaire statique sans runtime. Goroutines natives pour paralléliser heartbeat, sync, health check. Cross-compilation simple (`GOOS=linux GOARCH=amd64`). | Les tests mockent les commandes système (`wg`, `iptables`) pour ne pas requérir root. |
-| **FastAPI (Python async)** | Framework asynchrone pour gérer N heartbeats simultanés sans bloquer. Compatible `asyncpg` (PostgreSQL async natif). | Refus de démarrer si `SECRET_KEY=change-me-in-production` en mode prod. |
-| **Réseau privé Hetzner** | La communication LB→CP et Node→CP passe par un réseau 10.0.0.0/24 non routable depuis Internet. Double protection avec les firewalls. | Hetzner facture le trafic privé intra-datacenter à moindre coût que le trafic public. |
+| **3 VMs séparées** (LB + CP + Nodes) | Séparation des rôles : le LB est le seul point public, le CP expose le Dashboard sécurisé, les Nodes hébergent les ressources internes. | Latence réseau interne Hetzner : ~1ms → négligeable. |
+| **Nginx comme reverse proxy** | Léger, fiable, gestion native des WebSockets, facile à intégrer avec Certbot (TLS). Authentification centralisée via CP. | Configuration `proxy_set_header` obligatoire pour les WebSocket et les en-têtes proxy. |
+| **Ansible pour le provisioning** | Idempotent : réexécuter les playbooks ne casse rien. Chaque rôle est indépendant et testable. Pas d'agent à installer sur les VMs cibles. | Ordre d'exécution important : CP avant Nodes (healthcheck). |
+| **Docker Compose en production** | Le Control Plane / Dashboard tourne dans 3 conteneurs (API + PostgreSQL + Redis). Isolation, rolling update simple. | L'API est bindée sur `10.0.0.20:8000` uniquement, jamais sur `0.0.0.0`. |
+| **FastAPI (Python async)** | Framework asynchrone pour gérer N requêtes simultanées sans bloquer. Compatible `asyncpg` (PostgreSQL async natif). Dashboard intégré. | Refus de démarrer si `SECRET_KEY=change-me-in-production` en mode prod. |
+| **SMB / File Server interne** | Accès sécurisé aux fichiers et services internes via le Portal. Intégration authentification centralisée. Pas d'accès direct depuis Internet. | Réseau privé uniquement. Firewall strict sur les ports SMB. |
+| **Authentification centralisée** | Tous les accès (Dashboard, File Server, Services) passent par le CP. Logging centralisé, gestion des permissions. | Basée sur API tokens (X-API-Key) pour node-to-CP, JWT OAuth2 pour utilisateurs. |
+| **Réseau privé Hetzner** | Tout le trafic interne (LB→CP, CP→Nodes) passe par un réseau 10.0.0.0/24 non routable depuis Internet. Double protection avec les firewalls. | Hetzner facture le trafic privé intra-datacenter à moindre coût que le trafic public. |
 | **Cloud-init** | Permet de préparer les VMs dès le premier boot (désactivation mot de passe root, SSH hardened) avant même qu'Ansible intervienne. | Exécuté une seule fois. Les modifications post-boot sont gérées par Ansible. |
 | **Clé SSH ED25519** | Plus courte, plus rapide et plus sécurisée que RSA 2048/4096. L'accès SSH root est limité à l'IP admin via firewall Hetzner. | Jamais de mot de passe SSH. `PasswordAuthentication no` dans `sshd_config`. |
 
 ---
 
-## 4. Commandes de Déploiement
+## 4. Architecture du Dashboard
+
+Le **Control Plane** expose une interface web et une API REST centralisée :
+
+### Frontend (Vue.js)
+```
+/dashboard
+├── Users → Voir la liste des utilisateurs, permissions
+├── Services → État des services internes (File Server, App1, App2, etc.)
+├── Audit Log → Historique des accès
+└── Admin → Gestion des nœuds, tokens API
+```
+
+### Backend (FastAPI)
+```
+POST   /auth/login           → Authentification OAuth2
+POST   /auth/logout          → Déconnexion
+GET    /services             → Liste des services et leur état
+GET    /services/{id}/proxy  → Proxy direct vers le service interne
+POST   /access/grant         → Accorder l'accès à un utilisateur
+DELETE /access/{id}          → Révoquer l'accès
+GET    /nodes                → État de santé des nœuds (heartbeat)
+GET    /audit-log            → Logs d'accès centralisés
+```
+
+### Authentification
+- **OAuth2 + JWT** pour les utilisateurs (OIDC compatible, prêt pour Google/Azure integration)
+- **API Keys** pour node-to-CP (heartbeat, sync)
+- **2FA optionnel** (TOTP) pour les administrateurs
+
+---
+
+## 5. Commandes de Déploiement
 
 ```bash
 # 1. Provisionner les VMs sur Hetzner
-cd cours-infra/terraform
+cd terraform
 cp terraform.tfvars.example terraform.tfvars
 # Éditer terraform.tfvars avec vos valeurs
 terraform init
@@ -120,9 +158,9 @@ terraform output ansible_inventory
 
 # 3. Configurer les VMs (dans l'ordre)
 cd ../ansible
-ansible-playbook -i inventory.ini playbooks/02-setup-control-plane.yml
 ansible-playbook -i inventory.ini playbooks/01-setup-lb.yml
-ansible-playbook -i inventory.ini playbooks/03-setup-vpn-node.yml
+ansible-playbook -i inventory.ini playbooks/02-setup-dashboard.yml
+ansible-playbook -i inventory.ini playbooks/03-setup-node-fileserver.yml
 
 # 4. Vérifier
 ansible all -i inventory.ini -m ping
@@ -130,7 +168,7 @@ ansible all -i inventory.ini -m ping
 
 ---
 
-## 5. Validation & Tests
+## 6. Validation & Tests
 
 ### Test 1 — Connectivité SSH (bastion)
 ```bash
@@ -138,35 +176,35 @@ ssh -i ~/.ssh/id_ed25519 root@<LB_IP>    # ✅ Doit fonctionner
 ssh -i ~/.ssh/id_ed25519 root@<CP_IP>    # ✅ Doit fonctionner (si admin_ip correct)
 ```
 
-### Test 2 — LB répond sur HTTP
+### Test 2 — LB répond sur HTTPS
 ```bash
-curl -v http://<LB_IP>/health
-# Résultat attendu : 200 OK — "ok"
+curl -v https://<LB_IP>/
+# Résultat attendu : 200 OK — page d'accueil Dashboard
 ```
 
-### Test 3 — API accessible via le LB
+### Test 3 — Dashboard accessible via le LB
 ```bash
-curl http://<LB_IP>/health
-# Résultat attendu : {"status": "ok"} (proxy vers CP:8000)
+curl https://<LB_IP>/dashboard
+# Résultat attendu : redirection vers /login avec authentification
 ```
 
-### Test 4 — API NON accessible directement depuis Internet
+### Test 4 — Dashboard NON accessible directement depuis Internet
 ```bash
-curl http://<CP_IP>:8000/health
+curl http://<CP_IP>:8000/
 # Résultat attendu : timeout (firewall bloque)
 ```
 
-### Test 5 — WireGuard actif sur le nœud
+### Test 5 — File Server accessible depuis le CP uniquement
 ```bash
-ssh root@<NODE_IP> 'wg show wg0'
-# Résultat attendu : interface wg0 listée avec clé publique et port 51820
+ssh root@<FILESERVER_IP> 'smbstatus'
+# Résultat attendu : interface SMB active et configurée
 ```
 
-### Test 6 — Heartbeat nœud → API
+### Test 6 — Heartbeat nœud → Dashboard
 ```bash
-# Depuis le nœud VPN :
-curl -H "X-API-Key: <agent_api_key>" http://10.0.0.20:8000/nodes/self
-# Résultat attendu : JSON avec les infos du nœud
+# Depuis le nœud File Server :
+curl -H "X-API-Key: <node_api_key>" http://10.0.0.20:8000/nodes/health
+# Résultat attendu : JSON avec l'état du nœud (uptime, services, etc.)
 ```
 
 ### Test 7 — Isolation réseau (sécurité)
@@ -178,39 +216,43 @@ nc -zv <CP_IP> 5432
 
 ---
 
-## 6. Sécurité
+## 7. Sécurité
 
-### 6.1 Accès SSH
+### 7.1 Accès SSH
 - **Clé ED25519 uniquement** — mot de passe SSH désactivé dès le premier boot (cloud-init)
 - **Restriction par IP** — le firewall Hetzner n'autorise SSH que depuis `admin_ip` (variable Terraform)
 - Aucun accès root par mot de passe sur aucune des 3 VMs
 
-### 6.2 Isolation réseau
-- Le **Control Plane** n'est jamais exposé sur Internet — accessible uniquement depuis `10.0.0.0/24`
-- Le **LB** est le **seul point d'entrée public** (ports 80/443)
+### 7.2 Isolation réseau
+- Le **Dashboard / Control Plane** n'est jamais exposé sur Internet — accessible uniquement depuis `10.0.0.0/24`
+- Le **LB** est le **seul point d'entrée public** (ports 80/443, HTTPS obligatoire)
 - PostgreSQL et Redis sont bindés sur le réseau Docker interne (pas exposés en dehors du CP)
 - L'API FastAPI est bindée sur `10.0.0.20:8000` — inaccessible depuis l'IP publique du CP
 
-### 6.3 Authentification
+### 7.3 Authentification
 - JWT (HS512, expiry 30 min) pour les sessions utilisateur
-- `X-API-Key` pour la communication machine-à-machine (nœud → API)
+- `X-API-Key` pour la communication machine-à-machine (nœud → Dashboard)
 - L'API refuse de démarrer si `SECRET_KEY=change-me-in-production` en mode production
+- Toutes les authentifications sont loggées dans l'audit trail
 
-### 6.4 Chiffrement
+### 7.4 Chiffrement
 | Couche | Algorithme |
 |---|---|
-| Tunnel VPN | ChaCha20-Poly1305 + Curve25519 (WireGuard) |
-| HTTPS (LB) | TLS 1.3 via Certbot |
+| HTTPS (LB) | TLS 1.3 via Certbot + renewal automatique |
 | Mots de passe | Argon2id |
 | JWT | HMAC-SHA512 |
+| Données sensibles (DB) | AES-256-GCM (optionnel, pour production) |
 
-### 6.5 Kill Switch (nœud VPN)
-Si le nœud perd contact avec l'API pendant plus de 5 minutes, `iptables` bloque tout le trafic pour éviter les fuites IP des utilisateurs connectés.
+### 7.5 Contrôle d'accès au File Server
+- Authentification centralisée via le CP
+- Contrôle d'accès granulaire (par utilisateur / groupe)
+- Audit logging de tous les accès aux fichiers
+- Firewall strict : port SMB (445) uniquement accessible depuis le CP / nœuds autorisés
 
-### 6.6 Secrets
+### 7.6 Secrets
 - `terraform.tfvars` et `.env` exclus du dépôt Git (`.gitignore`)
 - Les secrets de production sont passés via les variables Ansible (à versionner dans un vault en production)
 
 ---
 
-*Document — Projet Infrastructure SecureNet — Déploiement VPN sur Hetzner Cloud*
+*Document — Projet Infrastructure SecureNet — Portail d'Accès Sécurisé sur Hetzner Cloud*
