@@ -1,0 +1,107 @@
+---
+# Playbook 3 — VPN Node (WireGuard + Go Agent)
+# Usage : ansible-playbook -i inventory.ini playbooks/03-setup-vpn-node.yml
+
+- name: Configure VPN Node
+  hosts: vpn_nodes
+  become: true
+
+  vars:
+    api_base_url: "http://{{ private_cp_ip }}:8000"
+    wireguard_port: 51820
+
+  tasks:
+    # --- Prérequis système ---
+    - name: Install WireGuard and dependencies
+      ansible.builtin.apt:
+        name:
+          - wireguard
+          - wireguard-tools
+          - iptables
+          - curl
+          - jq
+        state: present
+        update_cache: true
+
+    - name: Enable IP forwarding (persistant)
+      ansible.posix.sysctl:
+        name: net.ipv4.ip_forward
+        value: "1"
+        sysctl_set: true
+        state: present
+        reload: true
+
+    - name: Enable IPv6 forwarding
+      ansible.posix.sysctl:
+        name: net.ipv6.conf.all.forwarding
+        value: "1"
+        sysctl_set: true
+        state: present
+        reload: true
+
+    # --- Agent Go ---
+    - name: Create agent config directory
+      ansible.builtin.file:
+        path: /etc/vpn-agent
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Download vpn-agent binary from Control Plane
+      ansible.builtin.get_url:
+        url: "{{ api_base_url }}/static/agent/vpn-agent"
+        dest: /usr/local/bin/vpn-agent
+        mode: "0755"
+        headers:
+          X-Agent-Download-Key: "{{ agent_api_key }}"
+      notify: Restart vpn-agent
+
+    - name: Deploy agent config
+      ansible.builtin.template:
+        src: ../templates/agent.yaml.j2
+        dest: /etc/vpn-agent/config.yaml
+        owner: root
+        group: root
+        mode: "0600"
+      notify: Restart vpn-agent
+
+    - name: Deploy systemd service for vpn-agent
+      ansible.builtin.template:
+        src: ../templates/vpn-agent.service.j2
+        dest: /etc/systemd/system/vpn-agent.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify:
+        - Reload systemd
+        - Restart vpn-agent
+
+    - name: Enable and start vpn-agent service
+      ansible.builtin.service:
+        name: vpn-agent
+        state: started
+        enabled: true
+
+    # --- Vérification ---
+    - name: Wait for WireGuard interface to come up
+      ansible.builtin.command: wg show wg0
+      register: wg_status
+      until: wg_status.rc == 0
+      retries: 10
+      delay: 3
+      changed_when: false
+
+    - name: Show WireGuard status
+      ansible.builtin.debug:
+        msg: "{{ wg_status.stdout }}"
+
+  handlers:
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Restart vpn-agent
+      ansible.builtin.service:
+        name: vpn-agent
+        state: restarted

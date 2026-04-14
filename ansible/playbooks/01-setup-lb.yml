@@ -1,0 +1,53 @@
+---
+# Playbook 1 — Load Balancer (Nginx reverse proxy)
+# Usage : ansible-playbook -i inventory.ini playbooks/01-setup-lb.yml
+
+- name: Configure Load Balancer (Nginx)
+  hosts: lb
+  become: true
+
+  vars:
+    control_plane_ip: "{{ hostvars['cp']['private_cp_ip'] | default(private_cp_ip) }}"
+
+  tasks:
+    - name: Install Nginx
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+        update_cache: true
+
+    - name: Remove default Nginx site
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Deploy Nginx config (reverse proxy → Control Plane API)
+      ansible.builtin.template:
+        src: ../templates/nginx-lb.conf.j2
+        dest: /etc/nginx/sites-available/securenet.conf
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Enable Nginx site
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/securenet.conf
+        dest: /etc/nginx/sites-enabled/securenet.conf
+        state: link
+
+    - name: Validate Nginx config
+      ansible.builtin.command: nginx -t
+      changed_when: false
+
+    - name: Reload Nginx
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded
+        enabled: true
+
+    - name: Install Certbot (Let's Encrypt — optionnel en cours)
+      ansible.builtin.apt:
+        name:
+          - certbot
+          - python3-certbot-nginx
+        state: present

@@ -1,0 +1,16 @@
+# Secrets — ne JAMAIS committer ces fichiers
+terraform.tfvars
+*.tfstate
+*.tfstate.backup
+.terraform/
+
+# Ansible secrets
+ansible/inventory.ini
+ansible/templates/*.env*
+**/.env
+
+# Clés
+*.pem
+*.key
+id_rsa*
+id_ed25519*

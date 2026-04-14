@@ -1,0 +1,25 @@
+[Unit]
+Description=SecureNet VPN Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/vpn-agent
+Restart=on-failure
+RestartSec=5s
+
+# Sécurité systemd
+NoNewPrivileges=false          # L'agent a besoin de CAP_NET_ADMIN pour WireGuard
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_MODULE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_MODULE
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/etc/vpn-agent /var/log/vpn-agent
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vpn-agent
+
+[Install]
+WantedBy=multi-user.target

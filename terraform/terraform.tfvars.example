@@ -1,0 +1,5 @@
+hcloud_token    = "VOTRE_TOKEN_HETZNER_ICI"
+ssh_public_key  = "ssh-ed25519 AAAA... votre-cle-publique"
+admin_ip        = "0.0.0.0"   # Remplacer par votre IP publique
+project_name    = "securenet-vpn"
+location        = "nbg1"
